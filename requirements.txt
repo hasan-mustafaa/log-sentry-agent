@@ -1,0 +1,29 @@
+# Core
+python-dotenv>=1.0.0
+pyyaml>=6.0
+pydantic>=2.0.0
+
+# ML / Anomaly Detection
+scikit-learn>=1.3.0
+numpy>=1.24.0
+scipy>=1.11.0
+pandas>=2.0.0
+
+# Log Parsing
+drain3>=0.9.11
+
+# LLM Integration
+openai>=1.0.0
+# anthropic>=0.25.0  # uncomment if using Claude API instead
+
+# Dashboard
+streamlit>=1.28.0
+plotly>=5.18.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Utilities
+rich>=13.0.0
+tabulate>=0.9.0

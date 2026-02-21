@@ -1,0 +1,46 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# LogSentry Agent — Central Configuration
+# All tunable parameters live here. Code reads from this file via ConfigLoader.
+# ══════════════════════════════════════════════════════════════════════════════
+
+simulator:
+  services:
+    - name: "transaction-validator"
+      port: 8001
+      dependencies: ["fraud-check-service", "document-processor"]
+    - name: "fraud-check-service"
+      port: 8002
+      dependencies: ["title-search-service"]
+    - name: "document-processor"
+      port: 8003
+      dependencies: ["title-search-service"]
+    - name: "title-search-service"
+      port: 8004
+      dependencies: []
+  log_interval_seconds: 1
+  metrics_interval_seconds: 5
+
+detection:
+  window_size_seconds: 60
+  z_score_threshold: 3.0
+  isolation_forest:
+    contamination: 0.1
+    n_estimators: 100
+  ensemble_weights:
+    statistical: 0.4
+    ml: 0.6
+
+agent:
+  llm_provider: "openai"          # or "anthropic"
+  model: "gpt-4o-mini"            # or "claude-sonnet-4-6"
+  max_reasoning_steps: 5
+  confidence_threshold: 0.7
+
+remediation:
+  max_restarts_per_service: 3
+  restart_cooldown_seconds: 300
+  auto_escalate_after_failures: 2
+
+dashboard:
+  refresh_interval_seconds: 2
+  max_log_display: 100
