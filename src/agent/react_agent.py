@@ -120,6 +120,7 @@ class ReActAgent:
         messages = self._build_initial_messages(context)
         trace: list[ReasoningStep] = []
         actions_taken: list[Action] = []
+        exec_results: list[Any] = []
         resolved = False
 
         for step_num in range(1, self._max_steps + 1):
@@ -150,6 +151,7 @@ class ReActAgent:
                 elif executor is not None:
                     # Execute the action and capture result
                     exec_result = executor.execute(action)
+                    exec_results.append(exec_result)
                     observation = build_observation_from_action(
                         action.model_dump(),
                         exec_result.to_dict() if hasattr(exec_result, "to_dict") else {"result": str(exec_result)},
@@ -183,7 +185,23 @@ class ReActAgent:
                 break
 
         escalated = not resolved and len(trace) >= self._max_steps
+
+        # A successful restart or rollback clears all faults in the simulator,
+        # so treat it as resolved without waiting for the LLM's RCA assessment.
+        if not resolved:
+            for er in exec_results:
+                if er.success and getattr(er.action, "action", None) in (
+                    "restart_service", "rollback_service"
+                ):
+                    resolved = True
+                    escalated = False
+                    break
+
         rca_report = self._generate_rca_report(context, trace)
+
+        # Fall back to the RCA report's resolved field if still unresolved.
+        if not resolved:
+            resolved = bool(rca_report.get("resolved", False))
 
         return AgentResult(
             context=context,

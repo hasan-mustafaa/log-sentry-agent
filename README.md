@@ -57,14 +57,14 @@ Full explanation: [AI_TECHNIQUES.md](AI_TECHNIQUES.md)
 ### Prerequisites
 
 - Python 3.11+
-- An OpenAI API key (or Anthropic API key)
+- An OpenAI API key 
 
 ### Installation
 
 ```bash
 # 1. Clone the repository
 git clone <repo-url>
-cd aiopsagent
+cd log-sentry-agent
 
 # 2. Create and activate a virtual environment
 python -m venv .venv
@@ -141,7 +141,7 @@ Open [http://localhost:8501](http://localhost:8501) in your browser. The dashboa
 ## Project Structure
 
 ```
-aiopsagent/
+log-sentry-agent/
 ├── config/
 │   └── config.yaml             # Single source of truth for all parameters
 ├── src/
