@@ -15,17 +15,17 @@ score using configurable weights (config.yaml → detection.ensemble_weights).
 Typical usage:
 
     from src.detection import LogParser, FeatureExtractor
-    from src.detection import StatisticalDetector, MLDetector
+    from src.detection import StatisticalDetector, MLAnomalyDetector
 
     parser    = LogParser(config["detection"])
     extractor = FeatureExtractor(config["detection"])
     stat_det  = StatisticalDetector(config["detection"])
-    ml_det    = MLDetector(config["detection"]["isolation_forest"])
+    ml_det    = MLAnomalyDetector(config["detection"]["isolation_forest"])
 """
 
 from src.detection.log_parser import LogParser
 from src.detection.feature_extractor import FeatureExtractor
 from src.detection.statistical_detector import StatisticalDetector
-from src.detection.ml_detector import MLDetector
+from src.detection.ml_detector import MLAnomalyDetector
 
-__all__ = ["LogParser", "FeatureExtractor", "StatisticalDetector", "MLDetector"]
+__all__ = ["LogParser", "FeatureExtractor", "StatisticalDetector", "MLAnomalyDetector"]

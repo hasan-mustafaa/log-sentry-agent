@@ -1,163 +1,131 @@
-"""
-Structured log generator for simulated FCT microservices.
+"""Safety guardrails for the remediation layer.
 
-Generates realistic, structured log entries for each service defined in
-config.yaml. Each log entry contains: timestamp, level, service, message.
+Enforces per-service limits on automated actions to prevent the agent from
+making things worse (restart loops, thrashing, runaway scaling):
 
-Log levels and their approximate emission rates during normal operation:
-  - INFO:     80%
-  - WARNING:  15%
-  - ERROR:     5%
+  - Max restarts per service within a cooldown window
+  - Cooldown period between consecutive restarts
+  - Auto-escalation after a configurable number of consecutive failures
 
-Services simulated:
-  - transaction-validator  (upstream orchestrator)
-  - fraud-check-service    (depends on title-search-service)
-  - document-processor     (depends on title-search-service)
-  - title-search-service   (leaf dependency, no upstream deps)
-
-The generator checks a shared service_states dict each tick to determine
-whether to emit healthy or fault-mode logs, including cascade errors for
-services whose dependencies are faulted.
-
-# ──────────────────────────────────────────────────────────────
-# REMOVED FOR MVP (add back if time permits / mention in ASSUMPTIONS.md):
-#
-# - trace_id (UUID4 per request):
-#     Enables correlating a single request across all four services.
-#     Detection layer works on aggregate counts, not individual traces,
-#     so not needed for the demo. Would be valuable for distributed
-#     tracing visualization in a production system.
-#
-# - metadata dict on LogEntry:
-#     Extra structured fields (e.g. latency_ms, property_id, risk_score)
-#     attached to each log. Useful for richer analysis but the anomaly
-#     detector only needs timestamp, service, level, and message text.
-#
-# - DEBUG and CRITICAL log levels:
-#     Three levels (INFO, WARN, ERROR) are sufficient to demonstrate
-#     anomaly detection. A production system would use all five.
-#
-# - JSON serialization (to_dict / to_json):
-#     The MVP passes LogEntry objects directly between modules in memory.
-#     In production you'd serialize to JSON for log shipping (e.g. to
-#     Elasticsearch or CloudWatch).
-#
-# - Generator/yield pattern:
-#     Replaced with a simpler generate_tick() that returns a list.
-#     A real system would use async generators or a message queue.
-# ──────────────────────────────────────────────────────────────
+check() is called before every execution. record_execution() is called after.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+from src.agent.action_planner import Action, RestartAction
 
 
 @dataclass
-class LogEntry:
-    """A single structured log record emitted by a simulated service."""
+class GuardrailViolation:
+    """Records a single blocked action with the reason it was denied."""
 
-    timestamp: datetime
-    level: str          # INFO | WARNING | ERROR
-    service: str        # e.g. "transaction-validator"
-    message: str        # Human-readable log message
+    action: str
+    reason: str
+    blocked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class LogGenerator:
-    """
-    Produces a batch of log entries for all services on each tick.
+class Guardrails:
+    """Enforces safety limits on automated remediation actions.
 
-    Checks the shared service_states dict to determine healthy vs fault
-    output. Also checks the dependency graph so that when a downstream
-    service is faulted, upstream services emit cascade error messages.
+    All state is per-service and resets when reset() is called. Intended to be
+    shared between the Executor and main pipeline so escalation thresholds are
+    evaluated across the full session.
     """
 
-    def __init__(self, simulator_config: dict[str, Any], service_states: dict) -> None:
-        """
-        Args:
-            simulator_config: The 'simulator' section from config.yaml
-                              containing 'services' list with names and dependencies.
-            service_states:   Shared mutable dict tracking each service's health.
-                              Format: {"service-name": {"healthy": True, "fault_type": None}}
-        """
-        raise NotImplementedError
+    def __init__(self, remediation_config: dict[str, Any]) -> None:
+        """Initialize from the [remediation] section of config.yaml."""
+        self._max_restarts: int = remediation_config.get("max_restarts_per_service", 3)
+        self._cooldown: float = remediation_config.get("restart_cooldown_seconds", 300)
+        self._escalate_after: int = remediation_config.get("auto_escalate_after_failures", 2)
 
-    def generate_tick(self) -> list[LogEntry]:
-        """
-        Produce one batch of log entries (one or more per service).
+        self._restart_counts: dict[str, int] = {}
+        self._last_restart: dict[str, datetime] = {}
+        self._failure_counts: dict[str, int] = {}
+        self._violations: list[GuardrailViolation] = []
 
-        For each service:
-          1. Check if the service itself is faulted → use fault templates
-          2. Check if any dependency is faulted → mix in cascade templates
-          3. Otherwise → use healthy templates with normal level weights
-
-        Returns:
-            List of LogEntry objects for this tick.
-        """
-        raise NotImplementedError
-
-    def _select_log_level(self, fault_active: bool) -> str:
-        """
-        Pick a log level using weighted random selection.
-
-        Normal weights:  INFO 80%, WARNING 15%, ERROR 5%
-        Fault weights:   INFO 10%, WARNING 20%, ERROR 70%
+    def check(self, action: Action) -> tuple[bool, str]:
+        """Evaluate whether an action is permitted.
 
         Args:
-            fault_active: Whether this service or its dependencies are faulted.
+            action: The action to evaluate.
 
         Returns:
-            One of "INFO", "WARNING", "ERROR"
+            (True, "") if allowed, or (False, reason) if blocked.
         """
-        raise NotImplementedError
+        if isinstance(action, RestartAction):
+            return self._check_restart(action.target)
+        # Scale, rollback, alert, and no_action are always permitted.
+        return True, ""
 
-    def _pick_template(self, service: str, level: str, fault_type: str | None) -> str:
-        """
-        Select a random message template for the given service, level, and state.
-
-        Templates are defined per service, per state (healthy / fault_type),
-        per level. Placeholders like {tx_id}, {pid}, {latency} are filled
-        with random values by _fill_template().
+    def record_execution(self, action: Action, success: bool) -> None:
+        """Update internal state after an action has been executed.
 
         Args:
-            service:    Service name.
-            level:      Log level.
-            fault_type: Active fault type, or None for healthy operation.
-
-        Returns:
-            A message template string with placeholders.
+            action:  The action that was executed.
+            success: Whether the execution succeeded.
         """
-        raise NotImplementedError
+        if isinstance(action, RestartAction):
+            service = action.target
+            self._restart_counts[service] = self._restart_counts.get(service, 0) + 1
+            self._last_restart[service] = datetime.now(timezone.utc)
 
-    def _fill_template(self, template: str) -> str:
-        """
-        Replace placeholders in a template with random realistic values.
+        if not success:
+            service = getattr(action, "target", "_global")
+            self._failure_counts[service] = self._failure_counts.get(service, 0) + 1
 
-        Handles: {tx_id}, {pid}, {latency}, {duration}, {score}, {n}, {count}
-        Unused placeholders in a given template are harmless — .format()
-        only replaces what's present if you use .format_map() with a defaultdict.
+    def should_escalate(self, service: str) -> bool:
+        """Return True if the failure count for a service has hit the escalation threshold."""
+        return self._failure_counts.get(service, 0) >= self._escalate_after
 
-        Args:
-            template: Message string with {placeholder} tokens.
+    def reset(self, service: str | None = None) -> None:
+        """Clear guardrail state for one service, or all services if service is None."""
+        if service is None:
+            self._restart_counts.clear()
+            self._last_restart.clear()
+            self._failure_counts.clear()
+        else:
+            self._restart_counts.pop(service, None)
+            self._last_restart.pop(service, None)
+            self._failure_counts.pop(service, None)
 
-        Returns:
-            Filled message string.
-        """
-        raise NotImplementedError
+    def get_restart_count(self, service: str) -> int:
+        """Return the number of restarts recorded for a service."""
+        return self._restart_counts.get(service, 0)
 
-    def _get_faulted_dependencies(self, service: str) -> list[str]:
-        """
-        Check if any of this service's dependencies are currently faulted.
+    def get_failure_count(self, service: str) -> int:
+        """Return the number of failed executions recorded for a service."""
+        return self._failure_counts.get(service, 0)
 
-        Uses the dependency graph from config.yaml.
+    def seconds_until_cooldown_expires(self, service: str) -> float:
+        """Return seconds remaining in the restart cooldown for a service (0 if none)."""
+        last = self._last_restart.get(service)
+        if last is None:
+            return 0.0
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        return max(0.0, self._cooldown - elapsed)
 
-        Args:
-            service: The service to check dependencies for.
+    def _check_restart(self, service: str) -> tuple[bool, str]:
+        """Validate a restart against count and cooldown limits."""
+        count = self._restart_counts.get(service, 0)
+        if count >= self._max_restarts:
+            reason = (
+                f"Restart limit reached for '{service}' "
+                f"({count}/{self._max_restarts})."
+            )
+            self._violations.append(GuardrailViolation(action="restart_service", reason=reason))
+            return False, reason
 
-        Returns:
-            List of dependency service names that are currently faulted.
-            Empty list if all dependencies are healthy.
-        """
-        raise NotImplementedError
+        remaining = self.seconds_until_cooldown_expires(service)
+        if remaining > 0:
+            reason = (
+                f"Restart cooldown active for '{service}' — "
+                f"{remaining:.0f}s remaining."
+            )
+            self._violations.append(GuardrailViolation(action="restart_service", reason=reason))
+            return False, reason
+
+        return True, ""
